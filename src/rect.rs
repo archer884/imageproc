@@ -18,6 +18,17 @@ pub trait Region<T> {
 }
 
 impl Rect {
+    /// Create a new square located at 0, 0.
+    pub fn square(left: i32, top: i32, side_length: u32) -> Rect {
+        let half_length = (side_length / 2) as i32;
+        Rect {
+            left: left - half_length,
+            top: top - half_length,
+            width: side_length,
+            height: side_length,
+        }
+    }
+
     /// Reduces possibility of confusing coordinates and dimensions
     /// when specifying rects.
     pub fn at(x: i32, y: i32) -> RectPosition {
