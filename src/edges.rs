@@ -5,38 +5,6 @@ use image::{GenericImage, GrayImage, ImageBuffer, Luma};
 use gradients::{vertical_sobel, horizontal_sobel};
 use definitions::{HasWhite, HasBlack};
 use filter::gaussian_blur_f32;
-use std::ops::Range;
-
-struct NestedRangeIter {
-    last_outer: Option<u32>,
-    outer: Range<u32>,
-    inner: Range<u32>,
-}
-
-impl NestedRangeIter {
-    fn new(mut outer: Range<u32>, inner: Range<u32>) -> NestedRangeIter {
-        NestedRangeIter { last_outer: outer.next(), outer, inner }
-    }
-}
-
-impl Iterator for NestedRangeIter {
-    type Item = (u32, u32);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.last_outer {
-            None => None,
-            Some(outer) => {
-                match self.inner.next() {
-                    Some(inner) => Some((inner, outer)),
-                    None => {
-                        self.last_outer = self.outer.next();
-                        self.next()
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// An iterator over edge pixels detected via canny.
 pub struct CannyPixels {
@@ -44,7 +12,7 @@ pub struct CannyPixels {
     low_threshold: f32,
     high_threshold: f32,
     max_brightness: Luma<u8>,
-    indices: NestedRangeIter,
+    indices: Box<Iterator<Item = (u32, u32)>>,
     working_image: ImageBuffer<Luma<u8>, Vec<u8>>,
     pixels: Vec<(u32, u32)>,
 }
@@ -70,13 +38,14 @@ impl CannyPixels {
         // 3. Non-maximum-suppression (Make edges thinner)
         let thinned = non_maximum_suppression(&g, &gx, &gy);
         let (width, height) = thinned.dimensions();
+        let range = (1..(height - 1)).flat_map(move |y| (1..(width - 1)).map(move |x| (x, y)));
 
         CannyPixels {
             image: thinned,
             low_threshold,
             high_threshold,
             max_brightness: Luma::white(),
-            indices: NestedRangeIter::new(1..(height - 1), 1..(width - 1)),
+            indices: Box::new(range),
             working_image: ImageBuffer::from_pixel(width, height, Luma::black()),
             pixels: Vec::new(),
         }
@@ -89,44 +58,45 @@ impl Iterator for CannyPixels {
     fn next(&mut self) -> Option<Self::Item> {
         match self.pixels.pop() {
             None => {
-                match self.indices.next() {
-                    None => None,
-                    Some((x, y)) => {
-                        let mut edges = Vec::new();
+                for (x, y) in &mut self.indices {
+                    let mut edges = Vec::new();
 
-                        let inp_pix = *self.image.get_pixel(x, y);
-                        let out_pix = *self.working_image.get_pixel(x, y);
+                    let inp_pix = *self.image.get_pixel(x, y);
+                    let out_pix = *self.working_image.get_pixel(x, y);
 
-                        // If the edge strength is higher than high_thresh, mark it as an edge.
-                        if inp_pix[0] >= self.high_threshold && out_pix[0] == 0 {
-                            self.working_image.put_pixel(x, y, self.max_brightness);
-                            self.pixels.push((x, y));
-                            edges.push((x, y));
-                            // Track neighbors until no neighbor is >= low_thresh.
-                            while !edges.is_empty() {
-                                let (nx, ny) = edges.pop().unwrap();
-                                let neighbor_indices = [(nx + 1, ny),
-                                                        (nx + 1, ny + 1),
-                                                        (nx, ny + 1),
-                                                        (nx - 1, ny - 1),
-                                                        (nx - 1, ny),
-                                                        (nx - 1, ny + 1)];
+                    // If the edge strength is higher than high_thresh, mark it as an edge.
+                    if inp_pix[0] >= self.high_threshold && out_pix[0] == 0 {
+                        self.working_image.put_pixel(x, y, self.max_brightness);
+                        self.pixels.push((x, y));
+                        edges.push((x, y));
+                        // Track neighbors until no neighbor is >= low_thresh.
+                        while !edges.is_empty() {
+                            let (nx, ny) = edges.pop().unwrap();
+                            let neighbor_indices = [(nx + 1, ny),
+                                                    (nx + 1, ny + 1),
+                                                    (nx, ny + 1),
+                                                    (nx - 1, ny - 1),
+                                                    (nx - 1, ny),
+                                                    (nx - 1, ny + 1)];
 
-                                for neighbor_idx in &neighbor_indices {
-                                    let in_neighbor = *self.image.get_pixel(neighbor_idx.0, neighbor_idx.1);
-                                    let out_neighbor = *self.working_image.get_pixel(neighbor_idx.0, neighbor_idx.1);
-                                    if in_neighbor[0] >= self.low_threshold && out_neighbor[0] == 0 {
-                                        self.working_image.put_pixel(neighbor_idx.0, neighbor_idx.1, self.max_brightness);
-                                        self.pixels.push((neighbor_idx.0, neighbor_idx.1));
-                                        edges.push((neighbor_idx.0, neighbor_idx.1));
-                                    }
+                            for neighbor_idx in &neighbor_indices {
+                                let in_neighbor = *self.image.get_pixel(neighbor_idx.0, neighbor_idx.1);
+                                let out_neighbor = *self.working_image.get_pixel(neighbor_idx.0, neighbor_idx.1);
+                                if in_neighbor[0] >= self.low_threshold && out_neighbor[0] == 0 {
+                                    self.working_image.put_pixel(neighbor_idx.0, neighbor_idx.1, self.max_brightness);
+                                    self.pixels.push((neighbor_idx.0, neighbor_idx.1));
+                                    edges.push((neighbor_idx.0, neighbor_idx.1));
                                 }
                             }
                         }
+                    }
 
-                        self.pixels.pop()
+                    if !self.pixels.is_empty() {
+                        return self.pixels.pop();
                     }
                 }
+
+                return None;
             }
 
             item => item,
